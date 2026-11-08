@@ -1,4 +1,4 @@
-local VERSION = "1.89.3"
+local VERSION = "1.89.4"
 local SERVICE_TYPE = "stockroom_network"
 local HOSTNAME = "NotYourSystem"
 local SETTINGS_FILE = "settings"
@@ -255,18 +255,50 @@ local function cycleLineColor(key)
   saveSettings()
 end
 
+-- =========================================================
+-- Metadata and NBT Distinct Key Generation
+-- =========================================================
+
+local function getNbtSignature(detail, stack)
+  local nbt = (detail and (detail.nbt or detail.nbtHash)) or (stack and (stack.nbt or stack.nbtHash))
+  if type(nbt) == "table" then
+    local ok, ser = pcall(textutils.serialize, nbt)
+    return ok and ser or "table"
+  elseif nbt ~= nil then
+    return tostring(nbt)
+  end
+  return ""
+end
+
+local function getDamageValue(detail, stack)
+  local dmg = (detail and (detail.damage or detail.metadata)) or (stack and (stack.damage or stack.metadata))
+  if dmg ~= nil and tonumber(dmg) then
+    return tonumber(dmg)
+  end
+  return 0
+end
+
 local function stackKeyFrom(detail, stack)
-  local name = (detail and (detail.name or detail.id or detail.itemName)) or stack.name or "unknown"
-  local nbt = (detail and (detail.nbt or detail.nbtHash)) or stack.nbt
-  if nbt then return tostring(name) .. "@" .. tostring(nbt) end
-  return tostring(name)
+  local name = (detail and (detail.name or detail.id or detail.itemName)) or (stack and (stack.name or stack.id)) or "unknown"
+  local dmg = getDamageValue(detail, stack)
+  local nbtSig = getNbtSignature(detail, stack)
+
+  local key = tostring(name) .. ":" .. tostring(dmg)
+  if nbtSig ~= "" then
+    key = key .. "@" .. nbtSig
+  end
+  return key
 end
 
 local function displayNameFrom(detail, stack)
-  if detail then
-    return detail.displayName or detail.display or detail.title or detail.name or stack.name or "Unknown"
+  if detail and (detail.displayName or detail.display or detail.title) then
+    return detail.displayName or detail.display or detail.title
   end
-  return stack.name or "Unknown"
+  if stack and (stack.displayName or stack.display or stack.title) then
+    return stack.displayName or stack.display or stack.title
+  end
+  local fallbackName = (detail and (detail.name or detail.id)) or (stack and (stack.name or stack.id)) or "Unknown"
+  return prettyName(fallbackName)
 end
 
 local function isInventoryLike(methods)
@@ -368,7 +400,7 @@ local function readStacksFromDevice(deviceName)
     if not itemName then return end
 
     local count = tonumber(src.count or src.amount or src.size or src.qty or 1) or 1
-    local display = src.displayName or src.display or src.title or src.customName or prettyName(itemName)
+    local display = displayNameFrom(detail, stack)
 
     stacks[#stacks + 1] = {
       slot = slot,
@@ -378,7 +410,7 @@ local function readStacksFromDevice(deviceName)
       count = count,
       raw = src,
       nbt = src.nbt or src.nbtHash,
-      damage = src.damage or src.metadata
+      damage = getDamageValue(detail, stack)
     }
   end
 
@@ -407,14 +439,14 @@ local function itemSourceCount(item)
 end
 
 -- =========================================================
--- Multi-Scanner Aggregation & Rebuild
+-- Multi-Scanner Aggregation & Rebuild (With Auto-Suffixing)
 -- =========================================================
 
 local function rebuildGlobalIndex()
   discoverDevices()
   local aggregate = {}
 
-  -- 1. Scan Local Inventories
+  -- 1. Local Inventories
   for _, dev in ipairs(devices) do
     if dev.inventory and settings.sources[dev.name] ~= false then
       local list = readStacksFromDevice(dev.name)
@@ -423,12 +455,14 @@ local function rebuildGlobalIndex()
         local key = stackKeyFrom(detail, stack)
 
         if not aggregate[key] then
+          local base = displayNameFrom(detail, stack)
           aggregate[key] = {
             key = key,
-            name = displayNameFrom(detail, stack),
+            baseName = base,
+            name = base,
             id = (detail and (detail.name or detail.id or detail.itemName)) or stack.name or "unknown",
-            nbt = detail and detail.nbt or stack.nbt or nil,
-            damage = detail and detail.damage or stack.damage or nil,
+            nbt = getNbtSignature(detail, stack),
+            damage = getDamageValue(detail, stack),
             total = 0,
             sources = {},
             locations = {}
@@ -448,7 +482,7 @@ local function rebuildGlobalIndex()
     end
   end
 
-  -- 2. Aggregate All Connected Remote Scanners
+  -- 2. Remote Scanners
   for scannerId, scannerRec in pairs(scanners) do
     local sName = scannerRec.name or ("scanner_" .. tostring(scannerId))
     if type(scannerRec.items) == "table" then
@@ -457,12 +491,14 @@ local function rebuildGlobalIndex()
           local key = safeTostring(sItem.key, "")
           if key ~= "" then
             if not aggregate[key] then
+              local base = sItem.name or key
               aggregate[key] = {
                 key = key,
-                name = sItem.name or key,
+                baseName = base,
+                name = base,
                 id = sItem.id or key,
                 nbt = sItem.nbt,
-                damage = sItem.damage,
+                damage = sItem.damage or 0,
                 total = 0,
                 sources = {},
                 locations = {}
@@ -488,6 +524,28 @@ local function rebuildGlobalIndex()
             end
           end
         end
+      end
+    end
+  end
+
+  -- 3. Group by baseName to detect splits and assign "Item 1, Item 2..." suffixes
+  local baseGroups = {}
+  for _, item in pairs(aggregate) do
+    local b = item.baseName or item.id or "Unknown"
+    baseGroups[b] = baseGroups[b] or {}
+    table.insert(baseGroups[b], item)
+  end
+
+  for _, group in pairs(baseGroups) do
+    if #group > 1 then
+      table.sort(group, function(a, b)
+        if a.damage ~= b.damage then
+          return (a.damage or 0) < (b.damage or 0)
+        end
+        return tostring(a.key) < tostring(b.key)
+      end)
+      for idx, item in ipairs(group) do
+        item.name = item.baseName .. " " .. tostring(idx)
       end
     end
   end
@@ -884,6 +942,8 @@ local function normalizeItem(item, fallbackName)
     name = safeTostring(item.name or item.displayName or fallbackName or key, key),
     id = safeTostring(item.id or fallbackName or key, key),
     total = tonumber(item.total) or 0,
+    damage = item.damage or 0,
+    nbt = item.nbt or "",
     lineColor = tonumber(item.lineColor) or colors.gray,
     locations = locations
   }
@@ -1131,6 +1191,9 @@ local function drawInventoryPage(t, w, h)
 
     local main = getDisplayName(item)
     local secondary = item.id
+    if item.damage and tonumber(item.damage) and tonumber(item.damage) ~= 0 then
+      secondary = secondary .. " [meta:" .. tostring(item.damage) .. "]"
+    end
     if getCustomName(item) then secondary = secondary .. "  [" .. getCustomName(item) .. "]" end
 
     put(t, 3, y, (isFavorite(item.key) and "★ " or "") .. main, fg, bg, math.floor(leftW * 0.62))
@@ -1167,10 +1230,13 @@ local function drawInventoryPage(t, w, h)
   else
     put(t, rightX + 2, 6, getDisplayName(item), colors.lime, colors.gray)
     put(t, rightX + 2, 7, item.id, colors.white, colors.gray)
-    if getCustomName(item) then put(t, rightX + 2, 8, "Custom: " .. getCustomName(item), colors.lightGray, colors.gray) end
-    put(t, rightX + 2, 10, "Count: " .. fmt(item.total), colors.white, colors.gray)
-    put(t, rightX + 2, 11, "Sources: " .. fmt(itemSourceCount(item)), colors.white, colors.gray)
-    put(t, rightX + 2, 12, "Stacks: " .. fmt(#item.locations), colors.white, colors.gray)
+    if item.damage and tonumber(item.damage) and tonumber(item.damage) ~= 0 then
+      put(t, rightX + 2, 8, "Meta/Damage: " .. tostring(item.damage), colors.yellow, colors.gray)
+    end
+    if getCustomName(item) then put(t, rightX + 2, 9, "Custom: " .. getCustomName(item), colors.lightGray, colors.gray) end
+    put(t, rightX + 2, 11, "Count: " .. fmt(item.total), colors.white, colors.gray)
+    put(t, rightX + 2, 12, "Sources: " .. fmt(itemSourceCount(item)), colors.white, colors.gray)
+    put(t, rightX + 2, 13, "Stacks: " .. fmt(#item.locations), colors.white, colors.gray)
     put(t, rightX + 2, 14, "Label: " .. tostring(getLabel(item) or "none"), colors.white, colors.gray)
     put(t, rightX + 2, 15, "Favorite: " .. tostring(isFavorite(item.key)), colors.white, colors.gray)
     put(t, rightX + 2, 16, "Line color: " .. colorName(settings.lineColors[item.key] or colors.white), colors.white, colors.gray)
