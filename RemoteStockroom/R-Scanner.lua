@@ -1,7 +1,7 @@
 local VERSION = "1.89.4"
-local SERVICE_TYPE = "stockroom_network"
-local SERVER_HOST = "NotYourSystem" -- Must match server HOSTNAME
-local SETTINGS_FILE = "scanner_settings"
+local SERVICE_TYPE = "CHANGEME"
+local SERVER_HOST = "CHANGEME" -- Must match server HOSTNAME
+local SETTINGS_FILE = "settings"
 
 local settings = {
   output = "",
