@@ -1,6 +1,6 @@
 local VERSION = "1.89.4"
-local SERVICE_TYPE = "stockroom_network"
-local HOSTNAME = "NotYourSystem"
+local SERVICE_TYPE = "CHANGEME"
+local HOSTNAME = "CHANGEME"
 local SETTINGS_FILE = "settings"
 local PAGE_SIZE = 10
 
